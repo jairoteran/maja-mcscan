@@ -4,7 +4,7 @@ Maja MCScan finds Minecraft Java servers on authorized IPv4 addresses and option
 
 ## Setup
 
-The built-in scanner needs Python 3.10 or newer. QuboScanner and Java are not required. Masscan is required only for the optional Linux mode below. Install Node.js 24 and npm if you want to run the join bot, then run:
+The built-in scanner needs Python 3.10 or newer. The built-in scanner works without Java, QuboScanner, or Masscan. Install Node.js 24 and npm if you want to run the join bot, then run:
 
 ```sh
 npm ci --prefix audit-bot
@@ -22,13 +22,23 @@ Enter a port, a range, a comma-separated list, or `legacy` for the 299-port pres
 
 ## Masscan on Linux
 
-Install Masscan and make it available on your PATH. Masscan needs privileges to send raw packets. The Python process runs normally and prompts through sudo for the Masscan step when needed.
+Guided mode automatically uses Masscan on Linux when it is on PATH. Use `guided --tcp` to select the built-in scanner or `guided --masscan` to require Masscan. Masscan needs privileges to send raw packets. The Python process runs normally and prompts through sudo for the Masscan step when needed.
 
 ```sh
 python3 minecraft_audit.py guided --masscan
 ```
 
 Masscan discovers open TCP ports first. The tool then checks those candidates for Minecraft Java. The default is 1,000 packets per second. Use `--masscan-rate PPS` to set the packet rate within the limits of your environment. The estimate shown before confirmation covers the TCP sweep. Status checks and join tests take additional time.
+
+## Qubo status checks
+
+To use QuboScanner's Minecraft status library on the open endpoints found by Masscan, install JDK 21 and download the 1.0.1 JAR with dependencies from the [official QuboScanner release](https://github.com/replydev/Quboscanner/releases/tag/1.0.1).
+
+```sh
+python3 minecraft_audit.py guided --masscan --qubo-jar /path/to/quboscanner-1.0.1-jar-with-dependencies.jar
+```
+
+Maja MCScan runs one Java process for the candidate list. The optional join bot checks the endpoints that return a Minecraft status response.
 
 ## Reports
 

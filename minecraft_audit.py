@@ -1,4 +1,5 @@
 import argparse
+import base64
 import csv
 import ipaddress
 import os
@@ -106,12 +107,14 @@ def masscan_candidates(lines, network, ports):
     return sorted(candidates)
 
 
-def scan_masscan(network, ports, output, rate):
+def scan_masscan(network, ports, output, rate, qubo_jar=None):
     if not sys.platform.startswith("linux"):
         raise ValueError("The Masscan backend requires Linux. Use guided mode without --masscan on Windows.")
     binary = shutil.which("masscan")
     if not binary:
         raise ValueError("Install Masscan before enabling --masscan.")
+    if qubo_jar is not None and (not qubo_jar.is_file() or not shutil.which("java")):
+        raise ValueError("--qubo-jar requires a QuboScanner JAR and JDK 21 on PATH.")
     count = network.num_addresses * len(ports)
     print(f"Masscan: {count:,} TCP probes at {rate}/s, about {count / rate / 60:,.1f} minutes "
           "before Minecraft checks.")
@@ -139,14 +142,53 @@ def scan_masscan(network, ports, output, rate):
             candidates = masscan_candidates(file, network, ports)
 
     print(f"Masscan found {len(candidates):,} open TCP candidates. Checking Minecraft Java status.")
-    scanner.scan(candidates, output, 2, 10, 16, minecraft_only=True, total=len(candidates))
+    if qubo_jar is not None and candidates:
+        scan_qubo(candidates, qubo_jar, output)
+    else:
+        scanner.scan(candidates, output, 2, 10, 16, minecraft_only=True, total=len(candidates))
     print(f"Minecraft results saved to {output}.")
     return True
 
 
+def scan_qubo(candidates, jar, output):
+    source = Path(__file__).with_name("QuboProbe.java")
+    with TemporaryDirectory() as directory:
+        endpoints = Path(directory) / "endpoints.tsv"
+        endpoints.write_text("".join(f"{ip}\t{port}\n" for ip, port, _ in candidates), encoding="ascii")
+        command = ["java", "--class-path", str(jar.resolve()), str(source), str(endpoints)]
+        with output.open("x", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=scanner.FIELDS)
+            writer.writeheader()
+            file.flush()
+            with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, encoding="utf-8") as process:
+                try:
+                    for line in process.stdout:
+                        ip, port, version, players, motd = line.rstrip("\r\n").split("\t")
+                        version, motd = (base64.b64decode(value).decode("utf-8") for value in (version, motd))
+                        print(f"{ip}:{port} Minecraft Java {version}", flush=True)
+                        writer.writerow(dict(ip=ip, port=port, hostname=ip, service="Minecraft Java",
+                                             version=csv_text(version), players=players, motd=csv_text(motd),
+                                             observation="Public status response; access controls unverified"))
+                        file.flush()
+                except BaseException:
+                    process.terminate()
+                    raise
+                if process.wait():
+                    raise ValueError("The Qubo status checker failed. Check the JDK and JAR.")
+
+
+def csv_text(value):
+    return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
+
+
 def guided(args):
-    if getattr(args, "masscan_rate", None) is not None and not args.masscan:
-        raise ValueError("--masscan-rate requires --masscan.")
+    rate = getattr(args, "masscan_rate", None)
+    qubo_jar = getattr(args, "qubo_jar", None)
+    use_masscan = getattr(args, "masscan", False) or (
+        not getattr(args, "tcp", False) and sys.platform.startswith("linux") and shutil.which("masscan")
+    )
+    if not use_masscan and (rate is not None or qubo_jar is not None):
+        raise ValueError("--masscan-rate and --qubo-jar require Masscan mode.")
     target = input("Approved IPv4 address or CIDR (Enter to exit): ").strip()
     if not target:
         return
@@ -176,8 +218,8 @@ def guided(args):
         version = input("Minecraft client version [auto]: ").strip() or "auto"
     stamp = f"{datetime.now():%Y%m%d-%H%M%S-%f}"
     output = Path(f"audit-{stamp}.csv")
-    if getattr(args, "masscan", False):
-        completed = scan_masscan(network, ports, output, args.masscan_rate or 1000)
+    if use_masscan:
+        completed = scan_masscan(network, ports, output, rate or 1000, qubo_jar)
     else:
         completed = scan_targets([network], ports, output, rate=10)
     if completed and username:
@@ -248,7 +290,10 @@ def main():
     parser.set_defaults(run=guided)
     commands = parser.add_subparsers(dest="command")
     guided_parser = commands.add_parser("guided", help="Scan an approved IP or CIDR and optionally test joins")
-    guided_parser.add_argument("--masscan", action="store_true", help="Use Masscan for TCP discovery on Linux")
+    backend = guided_parser.add_mutually_exclusive_group()
+    backend.add_argument("--masscan", action="store_true", help="Require Masscan for TCP discovery on Linux")
+    backend.add_argument("--tcp", action="store_true", help="Use the built-in TCP scanner")
+    guided_parser.add_argument("--qubo-jar", type=Path, help="Use QuboScanner's mcping library on Masscan candidates")
     guided_parser.add_argument("--masscan-rate", type=masscan_rate, metavar="PPS",
                                help="Masscan packets per second (default: 1000)")
     scan = commands.add_parser("scan", help="Scan an explicit approved IPv4 address or CIDR")

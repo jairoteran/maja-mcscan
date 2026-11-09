@@ -6,3 +6,5 @@ joins-*.csv
 candidates.csv
 networks.csv
 approved.csv
+*.jar
+*.class
